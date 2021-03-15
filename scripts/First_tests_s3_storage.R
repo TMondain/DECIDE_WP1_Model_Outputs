@@ -1,7 +1,7 @@
 
 
 ### First tests of loading data from S3 storage
-library(terra)
+# library(terra)
 library(raster)
 library(dismo)
 library(foreach)
@@ -55,119 +55,95 @@ out_df <- vector('list', length = length(names))
 model = c('rf', 'lr', 'gam')
 taxa = 'moth'
 
-all_mods_out <- list()
+# get a list of all the species that appear in the outputs
+spp_names_lr <- unique(gsub(pattern="lr_SDMs_|_meanpred.grd|_quantilemaxmin.grd|_quantilerange.grd", replacement = '', 
+                            x = list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/lr'), pattern = '.grd')))
 
-for(i in 1:length(model)){
-  print(model[i])
+spp_names_rf <- unique(gsub(pattern="rf_SDMs_|_meanpred.grd|_quantilemaxmin.grd|_quantilerange.grd", replacement = '', 
+                            x = list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/rf'), pattern = '.grd')))
+
+spp_names_gam <- unique(gsub(pattern="gam_SDMs_|_meanpred.grd|_quantilemaxmin.grd|_quantilerange.grd", replacement = '', 
+                            x = list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/gam'), pattern = '.grd')))
+
+spp_names <- unique(c(spp_names_lr, spp_names_rf, spp_names_gam))
+
+# sdm outputs for each species
+species_stack <- list()
+
+# error outputs
+error_out <- list()
+
+for(i in 1:length(names)){
   
-  ## get the species names to loop over
-  names <- unique(gsub(pattern="_meanpred.grd|_quantilemaxmin.grd|_quantilerange.grd", replacement = '', 
-                       x = list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[i]), pattern = '.grd')))
-  names
+  print(names[i])
   
-  all_rasts_out <- list()
+  # initiate model list within for loop so that it gets replaced when starting a new species
+  # otherwise we might get some weird overlaps
+  model_stack <- list()
+  errored_models <- list()
   
-  for(n in 1:length(names)){
-    print(names[n])
+  for(m in 1:length(model)){
     
-    ## read mean_preds
-    mpred <- raster(list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[i]), 
-                               pattern = paste0(names[n], "_meanpred.grd"),
-                               full.names = TRUE))
-    names(mpred) <- paste0(model[i],'_mean_pred') ### change all to like this!!
+    check_models <- list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[m]), 
+                               pattern = paste0(names[i]),
+                               full.names = TRUE)
+    
+    if(length(check_models)<=1){
+      
+      print(paste('!!!   model', model[m], 'failed for species', names[i], '  !!!'))
+      
+      errored_models[[m]] <- data.frame(taxa = taxa, 
+                                        species = names[i], 
+                                        model = model[m])
+      
+      next
+    }
+    
+    # mean predictions
+    mp <- list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[m]), 
+                     pattern = paste0(names[i], "_meanpred.grd"),
+                     full.names = TRUE)
+    
+      mod_preds <- raster::stack(mp)
+      names(mod_preds) <- paste0(names[i], '_', model[m],'_mean_pred')
+    
+    
     
     # quantile min/max
-    qminmax <- raster::stack(list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[i]), 
-                                        pattern = paste0(names[n], "_quantilemaxmin.grd"),
-                                        full.names = TRUE))
-    names(qminmax) <- c('min', 'max')
+    mm <- list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[m]), 
+                     pattern = paste0(names[i], "_quantilemaxmin.grd"),
+                     full.names = TRUE)
+    
+      qminmax <- raster::stack(mm)
+      names(qminmax) <- c(paste0(names[i], '_', model[m],'_min'), paste0(names[i], '_', model[m],'_max'))
+    
     
     # quantile range
-    qrange <- raster::stack(list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[i]), 
-                                       pattern = paste0(names[n], "_quantilerange.grd"),
-                                       full.names = TRUE))
-    names(qrange) <- 'quantile_range'
+    qr <- list.files(paste0('/data-s3/thoval/sdm_outputs/', taxa, '/', model[m]), 
+                     pattern = paste0(names[i], "_quantilerange.grd"),
+                     full.names = TRUE)
     
-    all_rasts <- raster::stack(mpred, qminmax, qrange)
+     qrange <- raster::stack(qr)
+    names(qrange) <- paste0(names[i], '_', model[m], '_quantile_range')
     
-    all_rasts_out[[n]] <- all_rasts
+    
+    # stack all from one model together
+    model_stack[[m]] <- raster::stack(mod_preds, qminmax, qrange)
     
   }
   
-  all_rasts_out[[i]] <- all_rasts_out
+  # model_stack[sapply(model_stack,is.null)] <- raster(nrow=12500, 
+  #                                                    ncol=7000,
+  #                                                    crs="+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +units=m +no_defs")
+  
+  # To combine them together need to remove the NULL raster layers (i.e. if a model hasn't worked)
+  model_stack <- model_stack[!sapply(model_stack,is.null)]
+  
+  species_stack[[i]] <- raster::stack(model_stack)
+  
+  # Output the models that failed too
+  error_out[[i]] <- do.call('rbind', errored_models) 
   
 }
 
-#                              pattern = paste0(pattern, '.grd')), replacement = '')
-# names <- gsub(pattern = '.grd', x = names, replacement = '')
-# names
 
-
-## direct R to the different files 
-
-
-
-
-
-
-
-
-
-doParallel::registerDoParallel(detectCores()-1)
-registerDoSEQ()
-
-# choose thing to load
-list.files('/data-s3/thoval/sdm_outputs/moth/rf')
-
-pattern = 'quantilerange'
-
-out_df <- foreach(i = 1:length(names)) %do% {
-  
-  print(i)
-  
-  # get name of species and item of interest
-  names <- gsub(pattern = 'rf_SDMs_', x = list.files('/data-s3/thoval/sdm_outputs/moth/rf', 
-                                                     pattern = paste0(pattern, '.grd')), replacement = '')
-  names <- gsub(pattern = '.grd', x = names, replacement = '')
-  names
-  
-  # rf
-  rf <- loc_rf[grepl(pattern = paste(names[i]), x = loc_rf)]
-  
-  if(length(rf)==1){
-    load(rf)
-    rf_auc <- model_output$sdm_output$AUC
-    rm(model_output)
-  } else {
-    rf_auc <- NA
-  }
-  
-  # lr
-  lr <- loc_lr[grepl(pattern = names[i], x = loc_lr)]
-  
-  if(length(lr)==1){
-    load(lr)
-    lr_auc <- model_output$sdm_output$AUC
-    rm(model_output)
-  }else {
-    lr_auc <- NA
-  }
-  
-  # gam
-  gam <- loc_gam[grepl(pattern = names[i], x = loc_gam)]
-  
-  if(length(gam)==1){
-    load(gam)
-    gam_auc <- model_output$sdm_output$AUC
-    rm(model_output)
-  } else {
-    gam_auc <- NA
-  }
-  
-  return(data.frame(species = rep(names[i], 3), 
-                    auc = c(rf_auc, lr_auc, gam_auc),
-                    model = c('rf', 'lr', 'gam')))
-  
-  
-}
-out_df
